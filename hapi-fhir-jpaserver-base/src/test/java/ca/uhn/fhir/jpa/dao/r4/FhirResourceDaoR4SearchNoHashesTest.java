@@ -1,9 +1,10 @@
 package ca.uhn.fhir.jpa.dao.r4;
 
 import ca.uhn.fhir.jpa.dao.DaoConfig;
+import ca.uhn.fhir.jpa.dao.data.ISearchDao;
+import ca.uhn.fhir.jpa.model.entity.*;
 import ca.uhn.fhir.jpa.searchparam.SearchParameterMap;
 import ca.uhn.fhir.jpa.searchparam.SearchParameterMap.EverythingModeEnum;
-import ca.uhn.fhir.jpa.model.entity.*;
 import ca.uhn.fhir.jpa.util.TestUtil;
 import ca.uhn.fhir.model.api.Include;
 import ca.uhn.fhir.model.api.TemporalPrecisionEnum;
@@ -29,6 +30,7 @@ import org.hl7.fhir.r4.model.Observation.ObservationStatus;
 import org.hl7.fhir.r4.model.Subscription.SubscriptionChannelType;
 import org.hl7.fhir.r4.model.Subscription.SubscriptionStatus;
 import org.junit.*;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionCallbackWithoutResult;
@@ -39,6 +41,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.*;
@@ -47,6 +50,8 @@ import static org.mockito.Mockito.mock;
 @SuppressWarnings({"unchecked", "Duplicates"})
 public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(FhirResourceDaoR4SearchNoHashesTest.class);
+	@Autowired
+	private ISearchDao mySearchEntityDao;
 
 	@After
 	public void afterResetSearchSize() {
@@ -290,11 +295,11 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 		IIdType moId = myMedicationRequestDao.create(mo, mySrd).getId().toUnqualifiedVersionless();
 
 		HttpServletRequest request = mock(HttpServletRequest.class);
-		IBundleProvider resp = myPatientDao.patientTypeEverything(request, null, null, null, null, null, mySrd);
+		IBundleProvider resp = myPatientDao.patientTypeEverything(request, null, null, null, null, null, null, mySrd);
 		assertThat(toUnqualifiedVersionlessIds(resp), containsInAnyOrder(orgId, medId, patId, moId, patId2));
 
 		request = mock(HttpServletRequest.class);
-		resp = myPatientDao.patientInstanceEverything(request, patId, null, null, null, null, null, mySrd);
+		resp = myPatientDao.patientInstanceEverything(request, patId, null, null, null, null, null, null, mySrd);
 		assertThat(toUnqualifiedVersionlessIds(resp), containsInAnyOrder(orgId, medId, patId, moId));
 	}
 
@@ -322,9 +327,9 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 		SearchParameterMap map = new SearchParameterMap();
 		map.setEverythingMode(EverythingModeEnum.PATIENT_INSTANCE);
 		IPrimitiveType<Integer> count = new IntegerType(1000);
-		IBundleProvider everything = myPatientDao.patientInstanceEverything(mySrd.getServletRequest(), new IdType("Patient/A161443"), count, null, null, null, null, mySrd);
+		IBundleProvider everything = myPatientDao.patientInstanceEverything(mySrd.getServletRequest(), new IdType("Patient/A161443"), count, null, null, null, null, null, mySrd);
 
-		TreeSet<String> ids = new TreeSet<String>(toUnqualifiedVersionlessIdValues(everything));
+		TreeSet<String> ids = new TreeSet<>(toUnqualifiedVersionlessIdValues(everything));
 		assertThat(ids, hasItem("List/A161444"));
 		assertThat(ids, hasItem("List/A161468"));
 		assertThat(ids, hasItem("List/A161500"));
@@ -333,7 +338,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 		ourLog.info("Actual   {} - {}", ids.size(), ids);
 		assertEquals(allIds, ids);
 
-		ids = new TreeSet<String>();
+		ids = new TreeSet<>();
 		for (int i = 0; i < everything.size(); i++) {
 			for (IBaseResource next : everything.getResources(i, i + 1)) {
 				ids.add(next.getIdElement().toUnqualifiedVersionless().getValue());
@@ -385,6 +390,42 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 		assertThat(actual, containsInAnyOrder(p1id.getValue()));
 
 	}
+
+	@Test
+	public void testSearchTokenListLike() {
+
+		Patient p = new Patient();
+		p.addIdentifier().setSystem("SYS").setValue("FOO");
+		myPatientDao.create(p);
+		p = new Patient();
+		p.addIdentifier().setSystem("SYS").setValue("BAR");
+		myPatientDao.create(p);
+		p = new Patient();
+		p.addIdentifier().setSystem("SYS").setValue("BAZ");
+		myPatientDao.create(p);
+
+		myCaptureQueriesListener.clear();
+		SearchParameterMap map = new SearchParameterMap();
+		map.add(Patient.SP_IDENTIFIER, new TokenOrListParam().addOr(new TokenParam("FOO")).addOr(new TokenParam("BAR")));
+		map.setLoadSynchronous(true);
+		IBundleProvider search = myPatientDao.search(map);
+
+		myCaptureQueriesListener.logInsertQueriesForCurrentThread();
+		List<String> queries = myCaptureQueriesListener
+			.getSelectQueriesForCurrentThread()
+			.stream()
+			.map(t -> t.getSql(true, false))
+			.collect(Collectors.toList());
+		String resultingQueryNotFormatted = queries.get(0);
+
+		assertEquals(resultingQueryNotFormatted, 1, StringUtils.countMatches(resultingQueryNotFormatted, "SP_VALUE"));
+		assertThat(resultingQueryNotFormatted, containsString("SP_VALUE in ('BAR' , 'FOO')"));
+
+		// Ensure that the search actually worked
+		assertEquals(2, search.size().intValue());
+
+	}
+
 
 	@Test
 	public void testHasParameter() {
@@ -456,10 +497,12 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 
 		SearchParameterMap params;
 
-		params = new SearchParameterMap();
-		params.setLoadSynchronous(true);
-		params.add("_has", new HasParam("Observation", "subject", "device.identifier", "urn:system|DEVICEID"));
-		assertThat(toUnqualifiedVersionlessIdValues(myPatientDao.search(params)), contains(pid0.getValue()));
+// KHS JA When we switched _has from two queries to a nested subquery, we broke support for chains within _has
+// We have decided for now to prefer the performance optimization of the subquery over the slower full capability
+//		params = new SearchParameterMap();
+//		params.setLoadSynchronous(true);
+//		params.add("_has", new HasParam("Observation", "subject", "device.identifier", "urn:system|DEVICEID"));
+//		assertThat(toUnqualifiedVersionlessIdValues(myPatientDao.search(params)), contains(pid0.getValue()));
 
 		// No targets exist
 		params = new SearchParameterMap();
@@ -616,7 +659,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 				expect1.setResource(resource);
 				expect1.calculateHashes();
 
-				assertThat("Got: \"" + results.toString()+"\"", results, containsInAnyOrder(expect0, expect1));
+				assertThat("Got: \"" + results.toString() + "\"", results, containsInAnyOrder(expect0, expect1));
 			}
 		});
 	}
@@ -729,6 +772,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 	@Test
 	public void testIndexNoDuplicatesUri() {
 		ValueSet res = new ValueSet();
+		res.setUrl("http://www.example.org/vs");
 		res.getCompose().addInclude().setSystem("http://foo");
 		res.getCompose().addInclude().setSystem("http://bar");
 		res.getCompose().addInclude().setSystem("http://foo");
@@ -742,7 +786,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 			Class<ResourceIndexedSearchParamUri> type = ResourceIndexedSearchParamUri.class;
 			List<?> results = myEntityManager.createQuery("SELECT i FROM " + type.getSimpleName() + " i WHERE i.myMissing = false", type).getResultList();
 			ourLog.info(toStringMultiline(results));
-			assertEquals(2, results.size());
+			assertEquals(3, results.size());
 		});
 
 		List<IIdType> actual = toUnqualifiedVersionlessIds(myValueSetDao.search(new SearchParameterMap().setLoadSynchronous(true).add(ValueSet.SP_REFERENCE, new UriParam("http://foo"))));
@@ -1059,7 +1103,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 			QuantityParam v1 = new QuantityParam(ParamPrefixEnum.GREATERTHAN_OR_EQUALS, 150, "http://bar", "code1");
 			SearchParameterMap map = new SearchParameterMap().setLoadSynchronous(true).add(param, v1);
 			IBundleProvider result = myObservationDao.search(map);
-			assertThat("Got: "+ toUnqualifiedVersionlessIdValues(result), toUnqualifiedVersionlessIdValues(result), containsInAnyOrder(id1.getValue()));
+			assertThat("Got: " + toUnqualifiedVersionlessIdValues(result), toUnqualifiedVersionlessIdValues(result), containsInAnyOrder(id1.getValue()));
 		}
 	}
 
@@ -1091,7 +1135,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 			CompositeParam<TokenParam, QuantityParam> val = new CompositeParam<>(v0, v1);
 			SearchParameterMap map = new SearchParameterMap().setLoadSynchronous(true).add(param, val);
 			IBundleProvider result = myObservationDao.search(map);
-			assertThat("Got: "+ toUnqualifiedVersionlessIdValues(result), toUnqualifiedVersionlessIdValues(result), containsInAnyOrder(id2.getValue()));
+			assertThat("Got: " + toUnqualifiedVersionlessIdValues(result), toUnqualifiedVersionlessIdValues(result), containsInAnyOrder(id2.getValue()));
 		}
 		{
 			TokenParam v0 = new TokenParam("http://foo", "code1");
@@ -2246,17 +2290,24 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 		myPatientDao.create(patient, mySrd);
 
 		patient = new Patient();
+		patient.addIdentifier().setSystem("urn:system").setValue(null);
+		patient.addName().setFamily("Tester").addGiven("testSearchTokenParam2");
+		myPatientDao.create(patient, mySrd);
+
+		patient = new Patient();
 		patient.addIdentifier().setSystem("urn:system2").setValue("testSearchTokenParam002");
 		patient.addName().setFamily("Tester").addGiven("testSearchTokenParam2");
 		myPatientDao.create(patient, mySrd);
 
 		{
+			// Match system="urn:system" and value = *
 			SearchParameterMap map = new SearchParameterMap();
 			map.add(Patient.SP_IDENTIFIER, new TokenParam("urn:system", null));
 			IBundleProvider retrieved = myPatientDao.search(map);
 			assertEquals(2, retrieved.size().intValue());
 		}
 		{
+			// Match system="urn:system" and value = ""
 			SearchParameterMap map = new SearchParameterMap();
 			map.add(Patient.SP_IDENTIFIER, new TokenParam("urn:system", ""));
 			IBundleProvider retrieved = myPatientDao.search(map);
@@ -3288,7 +3339,7 @@ public class FhirResourceDaoR4SearchNoHashesTest extends BaseJpaR4Test {
 			"Observation/YES21",
 			"Observation/YES22",
 			"Observation/YES23"
-			));
+		));
 	}
 
 	private void createObservationWithEffective(String theId, String theEffective) {
